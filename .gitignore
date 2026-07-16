@@ -2,5 +2,5 @@
 __pycache__/
 *.egg-info/
 .claude/
-*_trace.json
+*_trace*.json
 comparison*.json

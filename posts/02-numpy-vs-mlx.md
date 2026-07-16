@@ -5,13 +5,13 @@ date: 2026-06-20
 tags: [performance, mlx, apple-silicon, gpu, profiling]
 ---
 
-[The previous post](./01-compiler-pipeline.md) built [`picokernel`](https://github.com/mani-ananth/picokernel), a small kernel compiler with a NumPy backend. NumPy was a good starting point: it runs on every CPU architecture Python supports — x86, ARM, POWER — and it picks up vendor-optimized SIMD and BLAS wherever it lands (Apple's Accelerate framework on my M4, MKL or OpenBLAS elsewhere). One backend, broad CPU coverage.
+[The previous post](./01-compiler-pipeline.md) built [`picokernel`](https://github.com/mani-ananth/picokernel), a small kernel compiler with a NumPy backend. NumPy was a good starting point: it runs on every CPU architecture Python supports — x86, ARM, POWER — and it picks up vendor-optimized SIMD and BLAS wherever it lands (Apple's Accelerate framework on my M4, MKL or OpenBLAS elsewhere). This allows for one backend with broad CPU coverage.
 
 But NumPy is strictly a CPU library. It doesn't target GPUs or other accelerators, and accelerators are where most of the interesting kernel-compiler problems live: data transfers, lazy execution, kernel fusion, synchronization. To open up that space, this post adds a second backend built on [MLX](https://github.com/ml-explore/mlx), Apple's NumPy-shaped array library that targets the M4's GPU through Metal.
 
 Two backends behind the same `@kernel` API also make for a clean measurement setup: same kernel, same input arrays, one variable — the hardware it runs on. That lets us ask where each backend is fast, and why.
 
-Here's the first measurement: `a * b + c` (a fused multiply-add, FMA) on float32 arrays, timed end-to-end (NumPy arrays in, NumPy arrays out).
+Here's the first measurement: elementwise `a * b + c` on float32 arrays, timed end-to-end (NumPy arrays in, NumPy arrays out).
 
 ```
 size=     1,000  numpy=  0.002ms   mlx=  0.24ms    NumPy 149x faster
@@ -33,7 +33,7 @@ To answer that, I built a profiler.
 
 ## The NumPy backend: vectorized C with no intermediates
 
-Before looking at MLX, a quick note on why the NumPy backend is fast in the first place.
+Before looking at MLX, it's worth a quick look at why the NumPy backend is fast in the first place.
 
 When you write `a * b + c` in plain NumPy, you get two array allocations: one for `a * b`, then a second for the addition. That's wasted memory traffic, and on large arrays it matters.
 
@@ -46,7 +46,7 @@ def kernel(a, b, c, o):
     np.add(v2, c, out=o)                 # writes directly to output
 ```
 
-Two operations. One pre-allocated scratch buffer. Zero intermediate allocations. And — critically — every line stays inside NumPy's vectorized C implementation. The Python interpreter is invoked only to call the two ufuncs; the actual element-wise work runs at C speed, with SIMD vectorization courtesy of Apple's Accelerate framework.
+Two operations with one pre-allocated scratch buffer and zero intermediate allocations. And — critically — every line stays inside NumPy's vectorized C implementation. The Python interpreter is invoked only to call the two ufuncs; the actual element-wise work runs at C speed, with SIMD vectorization courtesy of Apple's Accelerate framework.
 
 This is the CPU baseline for the comparison.
 
@@ -71,7 +71,7 @@ def kernel(a, b, c, o):
     o[...] = np.array(v4)   # d2h: copy result back to NumPy land
 ```
 
-Four steps:
+The lowered code breaks into four steps:
 
 1. **h2d transfers** — `mx.array()` copies a NumPy array into a Metal-managed buffer.
 2. **Lazy graph construction** — the arithmetic ops are nearly free, just building a DAG.
@@ -130,7 +130,7 @@ The entire difference between the two backends is data movement.
 
 The M4 has unified memory: CPU and GPU share the same DRAM. There's no PCIe bus, no separate VRAM. So why does `mx.array(a)` cost 11 milliseconds when the data is already in the right physical chip?
 
-The short answer: *physical sharing isn't the same as buffer sharing*.
+The short answer is that *physical sharing isn't the same as buffer sharing*.
 
 When you call `mx.array(numpy_array)`, MLX has to:
 
@@ -142,7 +142,7 @@ Even when the source and destination live on the same physical DRAM, you're stil
 
 ![Diagram of M4 unified memory architecture: a CPU box (labeled "NumPy runs here") and a GPU box (labeled "Metal shaders") at the top, both connected down into a single block labeled "Unified DRAM — one physical memory". Inside the DRAM block, two separate boxes labeled "NumPy buffer (malloc)" and "Metal buffer (MTLBuffer)", with a red arrow between them labeled "mx.array() copy ~11 ms / 381 MB". Caption: "Same physical memory, different logical buffers — the copy is still real."](./images/02-unified-memory.png)
 
-The takeaway: **on Apple Silicon, the GPU is cheap to reach, but handing it data still costs real time.**
+The takeaway is that **on Apple Silicon, the GPU is cheap to reach, but handing it data still costs real time.**
 
 ---
 
@@ -150,7 +150,7 @@ The takeaway: **on Apple Silicon, the GPU is cheap to reach, but handing it data
 
 If transfers dominate, the obvious move is to transfer less.
 
-The benchmark above assumes you start with a NumPy array and want a NumPy array back, so every call pays the full transfer cost around a few tens of milliseconds of arithmetic. But that's a calling-convention choice, not an MLX limitation. The device-resident alternative: move the inputs to the device once, chain N operations there without ever calling `np.array()`, and move the result back once at the end. This is exactly how PyTorch users keep tensors on the GPU between operations and how JAX users keep arrays on the accelerator across `jit`-compiled function boundaries.
+The benchmark above assumes you start with a NumPy array and want a NumPy array back, so every call pays the full transfer cost around a few tens of milliseconds of arithmetic. But that's a calling-convention choice, not an MLX limitation. The device-resident alternative is to move the inputs to the device once, chain N operations there without ever calling `np.array()`, and move the result back once at the end. This is exactly how PyTorch users keep tensors on the GPU between operations and how JAX users keep arrays on the accelerator across `jit`-compiled function boundaries.
 
 [`benchmarks/chained_ops.py`](../benchmarks/chained_ops.py) measures that directly: N chained steps of `x = x * b + c` at 100M elements. NumPy runs the chain with in-place `out=` ufuncs; MLX transfers the inputs once, builds the whole chain lazily on the device, and calls `mx.eval()` once at the end.
 
@@ -189,9 +189,9 @@ For now, the lesson is a familiar one in GPU programming: **moving data is usual
 
 ## A note on the profiler: what tracing buys, and what it costs
 
-A quick aside on tools. The findings above came out of a *trace-based* profiler — every operation in the generated code gets explicitly timed, and the result is a detailed event log loadable in Perfetto.
+The findings above came out of a *trace-based* profiler — every operation in the generated code gets explicitly timed, and the result is a detailed event log loadable in Perfetto.
 
-To be fair about what that buys: a standard Python profiler would have found the same top-level split. `cProfile` (a deterministic profiler — it hooks every function call, including C-implemented ones, and times each as an opaque unit) would report per-function totals for `mx.array`, `mx.eval`, and `np.array`; PyInstrument (a sampling profiler) would attribute the blocked time to the same call sites. What neither produces is the structure the analysis above leaned on: individual events in program order on a timeline, tagged with semantic categories (`h2d` / `op_lazy` / `sync` / `d2h`), matched one-to-one with the ops in the generated source, and mergeable with the NumPy backend's trace for side-by-side comparison in Perfetto.
+To be fair about what that buys, a standard Python profiler would have found the same top-level split. `cProfile` (a deterministic profiler — it hooks every function call, including C-implemented ones, and times each as an opaque unit) would report per-function totals for `mx.array`, `mx.eval`, and `np.array`; PyInstrument (a sampling profiler) would attribute the blocked time to the same call sites. What neither produces is the structure the analysis above leaned on: individual events in program order on a timeline, tagged with semantic categories (`h2d` / `op_lazy` / `sync` / `d2h`), matched one-to-one with the ops in the generated source, and mergeable with the NumPy backend's trace for side-by-side comparison in Perfetto.
 
 One limit applies to every Python-side profiler, this one included: none of them see *inside* `mx.eval`. The 25.3 ms sync block is opaque from Python — breaking it into individual Metal shader dispatches requires `mx.metal.start_capture()` and Xcode's Metal debugger.
 
@@ -205,7 +205,7 @@ That overhead profile is why production profilers tend to be sampling-based and 
 
 The next post in this series will be about matrix multiplication — an operation where the GPU is expected to be faster, because a large matmul does O(n³) arithmetic on O(n²) data: enough compute per byte to swamp the transfer cost *and* escape the DRAM-bandwidth ceiling that capped the elementwise chain above. That's also where the kernel compiler starts to earn its keep: matmul is where tiling, blocking, and loop-level lowering matter, and where the next backend (C codegen, or direct Metal shader generation) becomes worth building.
 
-The general theme: a fast GPU is not the same as a fast workload. The compiler's job is to make sure the GPU is doing useful work proportional to the data it's been handed. That's the bar for the next post.
+The general theme is that a fast GPU is not the same as a fast workload. The compiler's job is to make sure the GPU is doing useful work proportional to the data it's been handed. That's the bar for the next post.
 
 ---
 
