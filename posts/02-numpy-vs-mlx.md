@@ -152,7 +152,7 @@ If transfers dominate, the obvious move is to transfer less.
 
 The benchmark above assumes you start with a NumPy array and want a NumPy array back, so every call pays the full transfer cost around a few tens of milliseconds of arithmetic. But that's a calling-convention choice, not an MLX limitation. The device-resident alternative is to move the inputs to the device once, chain N operations there without ever calling `np.array()`, and move the result back once at the end. This is exactly how PyTorch users keep tensors on the GPU between operations and how JAX users keep arrays on the accelerator across `jit`-compiled function boundaries.
 
-[`benchmarks/chained_ops.py`](../benchmarks/chained_ops.py) measures that directly: N chained steps of `x = x * b + c` at 100M elements. NumPy runs the chain with in-place `out=` ufuncs; MLX transfers the inputs once, builds the whole chain lazily on the device, and calls `mx.eval()` once at the end.
+[`benchmarks/chained_ops.py`](https://github.com/mani-ananth/picokernel/blob/master/benchmarks/chained_ops.py) measures that directly: N chained steps of `x = x * b + c` at 100M elements. NumPy runs the chain with in-place `out=` ufuncs; MLX transfers the inputs once, builds the whole chain lazily on the device, and calls `mx.eval()` once at the end.
 
 ```
 N=  1  numpy=  26.9ms   mlx= 101.4ms   NumPy 3.8x faster
