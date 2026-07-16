@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Step-by-step timing breakdown: NumPy (out=) vs MLX for (a + b) * c.
+"""Step-by-step timing breakdown: NumPy (out=) vs MLX for a * b + c.
 
 Shows where time actually goes at two sizes:
   10,000 elements  —  small, GPU launch overhead dominates
@@ -152,6 +152,6 @@ def print_breakdown(size: int):
 
 
 if __name__ == "__main__":
-    print("(a + b) * c  —  per-step timing breakdown")
+    print("a * b + c  —  per-step timing breakdown")
     print_breakdown(10_000)
     print_breakdown(100_000_000)

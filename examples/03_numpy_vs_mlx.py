@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare NumPy (CPU) vs MLX (Metal GPU) for (a + b) * c."""
+"""Compare NumPy (CPU) vs MLX (Metal GPU) for a * b + c."""
 
 import time
 
@@ -10,12 +10,12 @@ import picokernel
 
 @picokernel.kernel
 def numpy_kernel(a, b, c, o):
-  o[...] = (a[...] + b[...]) * c[...]
+  o[...] = a[...] * b[...] + c[...]
 
 
 @picokernel.kernel(backend="mlx")
 def mlx_kernel(a, b, c, o):
-  o[...] = (a[...] + b[...]) * c[...]
+  o[...] = a[...] * b[...] + c[...]
 
 
 def bench(fn, *arrays, warmup=3, repeats=20):
@@ -49,7 +49,7 @@ def run(size: int):
 if __name__ == "__main__":
   a0, b0, c0, o0 = (np.zeros(4, dtype=np.float32) for _ in range(4))
 
-  print("(a + b) * c  —  numpy vs mlx\n")
+  print("a * b + c  —  numpy vs mlx\n")
   print("--- numpy (out= ufuncs, vectorized C) ---")
   print(numpy_kernel.lower(a0, b0, c0, o0))
   print("\n--- mlx (Metal GPU) ---")

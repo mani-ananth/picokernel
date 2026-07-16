@@ -124,19 +124,19 @@ def fma(a, b, c, o):
 
 ## Performance characteristics (M4, float32)
 
-For `(a + b) * c` across sizes:
+For `a * b + c` across sizes:
 
 ```
-size=     1,000  numpy=  0.002ms  mlx=  0.33ms   NumPy  219x faster
-size=    10,000  numpy=  0.003ms  mlx=  0.46ms   NumPy  125x faster
-size=   100,000  numpy=  0.023ms  mlx=  0.48ms   NumPy   20x faster
-size= 1,000,000  numpy=  0.36ms   mlx=  1.39ms   NumPy    2x faster
-size=10,000,000  numpy=  4.65ms   mlx= 12.18ms   NumPy    3x faster
+size=     1,000  numpy=  0.002ms  mlx=  0.24ms   NumPy  149x faster
+size=    10,000  numpy=  0.003ms  mlx=  0.21ms   NumPy   61x faster
+size=   100,000  numpy=  0.020ms  mlx=  0.28ms   NumPy   15x faster
+size= 1,000,000  numpy=  0.29ms   mlx=  1.39ms   NumPy    5x faster
+size=10,000,000  numpy=  4.01ms   mlx=  8.47ms   NumPy    2x faster
 ```
 
-NumPy wins at all sizes in the current design because each MLX kernel call pays h2d + d2h transfer costs (~9ms per 381MB array at 100M elements). The GPU compute itself is faster (MLX fuses multiply+add into one pass: 31.6ms vs NumPy's two-pass 51.6ms at 100M), but transfers dominate.
+NumPy is faster at all sizes in the current design because each MLX kernel call pays h2d + d2h transfer costs (h2d ~11ms per 381MB array at 100M elements; the d2h writeback is ~44ms because `o[...] = np.array(v)` makes two passes over the result). The GPU compute itself is faster (MLX fuses multiply+add into one pass: ~25ms vs NumPy's two-pass ~48ms at 100M), but transfers dominate.
 
-MLX wins when you chain operations in device-space without converting back to NumPy between kernels.
+Keeping data device-resident amortizes the transfers (`benchmarks/chained_ops.py`), but element-wise kernels stay DRAM-bandwidth-bound on unified memory, so MLX only approaches parity — pulling ahead takes work with higher arithmetic intensity (e.g. matmul).
 
 ---
 

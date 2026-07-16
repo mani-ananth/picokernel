@@ -50,7 +50,7 @@ def main():
     o_mlx = np.zeros(size, dtype=np.float32)
 
     mb = size * 4 / 1024 / 1024
-    print(f"\nProfiling (a + b) * c  —  {size:,} elements ({mb:.1f} MB/array), {repeats} repeats\n")
+    print(f"\nProfiling a * b + c  —  {size:,} elements ({mb:.1f} MB/array), {repeats} repeats\n")
 
     # Warmup — exclude JIT/shader-compile cost from the trace
     print("Warming up...")
