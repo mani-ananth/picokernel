@@ -51,11 +51,11 @@ The numpy/mlx backends are "thin": they emit Python source and `exec()` it in-pr
 
 **`mlx_lowering.py`** — MLX code generation. `lower_to_mlx(ir)` generates array-level MLX source. LOADs become `mx.array(ref)` (host→device); STOREs become `mx.eval(result)` + `ref[...] = np.array(result)` (sync + device→host).
 
-**`loop_ir.py`** — Mid-level loop IR (the C/Metal bridge). `lower_to_loops(ir)` lowers shape-specialized array ops into one of two schedules: `ElementwiseProgram` (a flat grid of `numel` threads, each running a straight-line `ScalarOp` body) or `MatmulProgram` (M·N threads, each a K-length reduction). Requires shapes — the grid and matmul dims come from the traced shapes. Broadcasting, matmul fused with elementwise, and >2D matmul raise `NotImplementedError`.
+**`loop_ir.py`** — Mid-level loop IR (the C/Metal bridge). `lower_to_loops(ir)` splits the kernel into an ordered list of **segments** (a `LoweredProgram`), each one schedule: `ElementwiseProgram` (a flat grid of `numel` threads running a straight-line `ScalarOp` body, possibly with several outputs) or `MatmulProgram` (M·N threads, each a K-length reduction). A MATMUL can't share a grid with elementwise neighbours (different iteration space), so `(a@b)+bias` becomes two segments joined by a device-only **intermediate buffer** — multi-kernel dispatch, not fusion. Requires shapes. Broadcasting and >2D matmul raise `NotImplementedError`.
 
 **`metal_lowering.py`** — Metal codegen. `lower_to_metal(prog)` emits Metal Shading Language source from a loop program. Both schedules use a 1D grid over `thread_position_in_grid` with shape dims baked in as literals; everything is float32 (Metal has no float64).
 
-**`metal_runtime.py`** — Metal execution. `compile_metal(ir)` runs `lower_to_loops → lower_to_metal`, compiles the MSL at runtime via `metalcompute` (no Xcode/`.metallib` needed), and returns a callable that allocates unified-memory buffers, copies inputs in (cast to float32), dispatches `grid` threads, and writes the output buffer back into the caller's array. Caches keyed by `id(ir)`.
+**`metal_runtime.py`** — Metal execution. `compile_metal(ir)` runs `lower_to_loops → lower_to_metal`, compiles the (multi-kernel) MSL once at runtime via `metalcompute` (no Xcode/`.metallib` needed), and returns a callable that allocates unified-memory buffers (inputs cast to float32, consts baked, intermediates device-only), dispatches each segment's grid in order, and writes the output buffer back into the caller's array. Caches keyed by `id(ir)`.
 
 **`runtime.py`** — Execution. `compile_numpy(ir)` and `compile_mlx(ir)` exec the lowered source and cache the callable keyed by `id(ir)`; `compile_metal` is re-exported here from `metal_runtime.py`.
 
@@ -77,7 +77,7 @@ Three backends, selected via `@kernel(backend=...)`:
 | `"mlx"` | no | `lower_to_mlx` | array-level MLX on Metal GPU |
 | `"metal"` | no | `lower_to_loops` → `lower_to_metal` | hand-written MSL via loop IR; runtime-compiled with `metalcompute`; float32 only; `run_profiled` unsupported |
 
-The metal backend needs `pip install metalcompute` (Apple Silicon) and shape-specialized IR, so `lower()`/`run()` require arrays. V1 supports elementwise graphs (same-shape arrays + scalar/array consts, no broadcasting) and standalone 2D matmul.
+The metal backend needs `pip install metalcompute` (Apple Silicon) and shape-specialized IR, so `lower()`/`run()` require arrays. It supports elementwise graphs (same-shape arrays + scalar/array consts, no broadcasting), 2D matmul, and arbitrary mixes of the two via multi-kernel dispatch (e.g. `(a@b)+bias`, `(a@b)@c`) — each op-cluster is its own GPU dispatch, no fusion. Broadcasting, >2D/batched matmul, and float64 remain unsupported.
 
 ## Key design conventions
 

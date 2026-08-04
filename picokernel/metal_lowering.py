@@ -1,15 +1,21 @@
-"""Lowering: convert a loop-level program to Metal Shading Language source.
+"""Lowering: convert a lowered program to Metal Shading Language source.
 
-Metal compute kernels run one thread per grid point. Both schedules below use a
-1D grid indexed by `thread_position_in_grid`; shape-specialized dims (numel, M,
-N, K) are baked in as literals since the IR is retraced per shape anyway.
+A kernel lowers to an ordered list of segments (see loop_ir.py); each segment
+becomes one `kernel void` in the emitted source, dispatched in turn by the
+runtime. Metal compute kernels run one thread per grid point; both schedules use
+a 1D grid indexed by `thread_position_in_grid`, with shape dims (numel, M, N, K)
+baked in as literals since the IR is retraced per shape anyway.
+
+A buffer is `device float*` (mutable) if the segment writes it, else
+`device const float*`. The same intermediate is const in the segment that reads
+it and mutable in the segment that wrote it.
 
 Metal has no float64 - everything is float32. The runtime casts on the buffer
 boundary; this emitter only ever sees float.
 """
 
 from .core import OpType
-from .loop_ir import ElementwiseProgram, MatmulProgram, ScalarOp
+from .loop_ir import ElementwiseProgram, LoweredProgram, MatmulProgram, ScalarOp
 
 _BINOP = {
   OpType.ADD: "+",
@@ -19,9 +25,18 @@ _BINOP = {
 }
 
 
-def _ptr(buf, mutable: bool, index: int) -> str:
-  qual = "device float*" if mutable else "device const float*"
-  return f"    {qual} {buf.name} [[buffer({index})]]"
+def lower_to_metal(lowered: LoweredProgram) -> str:
+  """Generate MSL source for a lowered program (one kernel per segment)."""
+  kernels = [_lower_segment(seg) for seg in lowered.segments]
+  return "\n".join(["#include <metal_stdlib>", "using namespace metal;", "", *kernels])
+
+
+def _lower_segment(seg) -> str:
+  if isinstance(seg, ElementwiseProgram):
+    return _lower_elementwise(seg)
+  if isinstance(seg, MatmulProgram):
+    return _lower_matmul(seg)
+  raise NotImplementedError(f"No Metal lowering for {type(seg).__name__}")
 
 
 def _fmt_literal(value) -> str:
@@ -43,49 +58,38 @@ def _emit_scalar(op: ScalarOp) -> str:
   raise NotImplementedError(f"Metal backend cannot lower scalar op {op.op}")
 
 
-def lower_to_metal(prog) -> str:
-  """Generate MSL source for a loop program. Function name == prog.name."""
-  if isinstance(prog, ElementwiseProgram):
-    return _lower_elementwise(prog)
-  if isinstance(prog, MatmulProgram):
-    return _lower_matmul(prog)
-  raise NotImplementedError(f"No Metal lowering for {type(prog).__name__}")
-
-
-def _signature(name: str, buffers) -> str:
-  params = [
-    _ptr(b, mutable=(b.role == "output"), index=i)
-    for i, b in enumerate(buffers)
-  ]
+def _signature(name: str, buffers, writes) -> str:
+  params = []
+  for idx, b in enumerate(buffers):
+    qual = "device float*" if b.name in writes else "device const float*"
+    params.append(f"    {qual} {b.name} [[buffer({idx})]]")
   params.append("    uint i [[thread_position_in_grid]]")
-  joined = ",\n".join(params)
-  return f"kernel void {name}(\n{joined})"
+  return f"kernel void {name}(\n" + ",\n".join(params) + ")"
 
 
-def _lower_elementwise(prog: ElementwiseProgram) -> str:
-  lines = ["#include <metal_stdlib>", "using namespace metal;", ""]
-  lines.append(_signature(prog.name, prog.buffers) + " {")
-  lines.append(f"  if (i >= {prog.grid}u) return;")
-  for op in prog.body:
+def _lower_elementwise(seg: ElementwiseProgram) -> str:
+  lines = [_signature(seg.name, seg.buffers, seg.writes) + " {"]
+  lines.append(f"  if (i >= {seg.grid}u) return;")
+  for op in seg.body:
     lines.append(_emit_scalar(op))
-  lines.append(f"  {prog.out_buffer}[i] = {prog.out_temp};")
+  for out_temp, out_buffer in seg.outputs:
+    lines.append(f"  {out_buffer}[i] = {out_temp};")
   lines.append("}")
   return "\n".join(lines)
 
 
-def _lower_matmul(prog: MatmulProgram) -> str:
-  lines = ["#include <metal_stdlib>", "using namespace metal;", ""]
-  lines.append(_signature(prog.name, prog.buffers) + " {")
-  lines.append(f"  if (i >= {prog.grid}u) return;")
-  lines.append(f"  uint row = i / {prog.N}u;")
-  lines.append(f"  uint col = i % {prog.N}u;")
+def _lower_matmul(seg: MatmulProgram) -> str:
+  lines = [_signature(seg.name, seg.buffers, seg.writes) + " {"]
+  lines.append(f"  if (i >= {seg.grid}u) return;")
+  lines.append(f"  uint row = i / {seg.N}u;")
+  lines.append(f"  uint col = i % {seg.N}u;")
   lines.append("  float acc = 0.0f;")
-  lines.append(f"  for (uint k = 0u; k < {prog.K}u; k++) {{")
+  lines.append(f"  for (uint k = 0u; k < {seg.K}u; k++) {{")
   lines.append(
-    f"    acc += {prog.a_buffer}[row * {prog.K}u + k]"
-    f" * {prog.b_buffer}[k * {prog.N}u + col];"
+    f"    acc += {seg.a_buffer}[row * {seg.K}u + k]"
+    f" * {seg.b_buffer}[k * {seg.N}u + col];"
   )
   lines.append("  }")
-  lines.append(f"  {prog.out_buffer}[i] = acc;")
+  lines.append(f"  {seg.out_buffer}[i] = acc;")
   lines.append("}")
   return "\n".join(lines)
