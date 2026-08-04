@@ -6,6 +6,7 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+metal = ["metalcompute"]
 
 [tool.setuptools]
 packages = ["picokernel"]

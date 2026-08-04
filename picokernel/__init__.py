@@ -3,7 +3,7 @@
 from .core import pretty_print
 from .lowering import lower_to_numpy
 from .mlx_lowering import lower_to_mlx
-from .runtime import compile_mlx, compile_numpy
+from .runtime import compile_metal, compile_mlx, compile_numpy
 from .trace import trace_kernel
 
 
@@ -29,6 +29,8 @@ class KernelFunction:
   def _compile(self, ir):
     if self._backend == "mlx":
       return compile_mlx(ir)
+    if self._backend == "metal":
+      return compile_metal(ir)
     return compile_numpy(ir)
 
   def _get_or_trace(self, arrays) -> tuple:
@@ -51,15 +53,20 @@ class KernelFunction:
     compiled(*arrays)
 
   def lower(self, *arrays) -> str:
-    """Return lowered source. Pass arrays for shape-aware tracing."""
+    """Return lowered source. Pass arrays for shape-aware tracing.
+
+    The metal backend needs shape-specialized IR, so it requires arrays.
+    """
     if arrays:
       ir, _ = self._get_or_trace(arrays)
-      if self._backend == "mlx":
-        return lower_to_mlx(ir)
-      return lower_to_numpy(ir)
-    ir = trace_kernel(self._fn)
+    else:
+      ir = trace_kernel(self._fn)
     if self._backend == "mlx":
       return lower_to_mlx(ir)
+    if self._backend == "metal":
+      from .loop_ir import lower_to_loops
+      from .metal_lowering import lower_to_metal
+      return lower_to_metal(lower_to_loops(ir))
     return lower_to_numpy(ir)
 
   def run_profiled(self, *arrays, profiler=None, n_repeats: int = 1):
@@ -77,6 +84,12 @@ class KernelFunction:
     """
     from .profiler import Profiler
     from .profiled_lowering import compile_mlx_profiled, compile_numpy_profiled
+
+    if self._backend == "metal":
+      raise NotImplementedError(
+        "run_profiled is not supported for the metal backend yet; "
+        "use __call__ for timing."
+      )
 
     pid = 2 if self._backend == "mlx" else 1
     if profiler is None:
