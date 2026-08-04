@@ -6,6 +6,7 @@ import numpy as np
 
 from .core import KernelIR
 from .lowering import lower_to_numpy
+from .metal_runtime import compile_metal
 from .mlx_lowering import lower_to_mlx
 
 _numpy_cache: dict[int, tuple[KernelIR, Callable]] = {}
