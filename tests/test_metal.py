@@ -185,14 +185,94 @@ def test_broadcasting_raises():
     k(x, y, out)
 
 
-def test_matmul_with_fused_elementwise_raises():
+# --- Multi-kernel dispatch: matmul mixed with elementwise ---
+# Each of these lowers to more than one segment (a matmul kernel plus one or more
+# elementwise kernels) dispatched in order through device-only intermediate buffers.
+
+
+def test_matmul_plus_bias():
+  """(a @ b) + bias — matmul segment feeds an elementwise segment."""
   @picokernel.kernel(backend="metal")
   def k(a, b, bias, o):
     o[...] = (a[...] @ b[...]) + bias[...]
 
-  a = np.eye(2, dtype=np.float32)
-  b = np.eye(2, dtype=np.float32)
-  bias = np.ones((2, 2), dtype=np.float32)
+  rng = np.random.default_rng(0)
+  a = rng.random((2, 3), dtype=np.float32)
+  b = rng.random((3, 4), dtype=np.float32)
+  bias = rng.random((2, 4), dtype=np.float32)
+  out = np.zeros((2, 4), dtype=np.float32)
+  k(a, b, bias, out)
+  np.testing.assert_array_almost_equal(out, a @ b + bias, decimal=5)
+
+
+def test_elementwise_feeds_matmul():
+  """(a + b) @ c — elementwise segment feeds a matmul segment."""
+  @picokernel.kernel(backend="metal")
+  def k(a, b, c, o):
+    o[...] = (a[...] + b[...]) @ c[...]
+
+  rng = np.random.default_rng(1)
+  a = rng.random((2, 3), dtype=np.float32)
+  b = rng.random((2, 3), dtype=np.float32)
+  c = rng.random((3, 4), dtype=np.float32)
+  out = np.zeros((2, 4), dtype=np.float32)
+  k(a, b, c, out)
+  np.testing.assert_array_almost_equal(out, (a + b) @ c, decimal=5)
+
+
+def test_chained_matmul():
+  """(a @ b) @ c — two matmul segments, intermediate carries the first result."""
+  @picokernel.kernel(backend="metal")
+  def k(a, b, c, o):
+    o[...] = (a[...] @ b[...]) @ c[...]
+
+  rng = np.random.default_rng(2)
+  a = rng.random((2, 3), dtype=np.float32)
+  b = rng.random((3, 4), dtype=np.float32)
+  c = rng.random((4, 2), dtype=np.float32)
   out = np.zeros((2, 2), dtype=np.float32)
-  with pytest.raises(NotImplementedError, match="matmul"):
-    k(a, b, bias, out)
+  k(a, b, c, out)
+  np.testing.assert_array_almost_equal(out, (a @ b) @ c, decimal=4)
+
+
+def test_matmul_with_scalar_epilogue():
+  """(a @ b) * 2 + bias — matmul then a fused-scalar elementwise epilogue."""
+  @picokernel.kernel(backend="metal")
+  def k(a, b, bias, o):
+    o[...] = (a[...] @ b[...]) * 2.0 + bias[...]
+
+  rng = np.random.default_rng(3)
+  a = rng.random((2, 3), dtype=np.float32)
+  b = rng.random((3, 2), dtype=np.float32)
+  bias = rng.random((2, 2), dtype=np.float32)
+  out = np.zeros((2, 2), dtype=np.float32)
+  k(a, b, bias, out)
+  np.testing.assert_array_almost_equal(out, (a @ b) * 2.0 + bias, decimal=5)
+
+
+def test_multi_segment_source_has_two_kernels():
+  """(a @ b) + bias emits a suffixed kernel per segment."""
+  @picokernel.kernel(backend="metal")
+  def k(a, b, bias, o):
+    o[...] = (a[...] @ b[...]) + bias[...]
+
+  a = np.zeros((2, 3), dtype=np.float32)
+  b = np.zeros((3, 4), dtype=np.float32)
+  bias = np.zeros((2, 4), dtype=np.float32)
+  out = np.zeros((2, 4), dtype=np.float32)
+  source = k.lower(a, b, bias, out)
+  assert source.count("kernel void") == 2
+  assert "kernel void k_0(" in source
+  assert "kernel void k_1(" in source
+
+
+def test_identity_passthrough():
+  """o = x lowers to a single copy kernel."""
+  @picokernel.kernel(backend="metal")
+  def k(x, o):
+    o[...] = x[...]
+
+  x = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+  out = np.zeros(3, dtype=np.float32)
+  k(x, out)
+  np.testing.assert_array_almost_equal(out, x)
